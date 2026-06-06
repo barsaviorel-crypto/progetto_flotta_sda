@@ -1,0 +1,835 @@
+import subprocess
+import base64
+import sys
+import os
+from tkinter import messagebox, filedialog, ttk
+
+
+def get_hwid():
+    """Recupera l'UUID unico del PC tramite PowerShell."""
+    try:
+        cmd = 'powershell -command "(Get-CimInstance Win32_ComputerSystemProduct).UUID"'
+        uuid = subprocess.check_output(cmd, shell=True).decode().strip()
+        if not uuid or "Error" in uuid:
+            cmd_bios = 'powershell -command "(Get-CimInstance Win32_Bios).SerialNumber"'
+            uuid = subprocess.check_output(cmd_bios, shell=True).decode().strip()
+        return uuid
+    except Exception:
+        return "ID_NON_RILEVATO"
+
+
+def verifica_licenza():
+    id_attuale = get_hwid()
+    if not os.path.exists("license.key"):
+        messagebox.showerror("Licenza",
+                             f"Licenza mancante.\nInvia questo ID allo sviluppatore(Viorel):\n\n{id_attuale}")
+        # Crea un file di testo per facilitare il copia-incolla al cliente
+        with open("ID_PER_ATTIVAZIONE.txt", "w") as f: f.write(id_attuale)
+        print(f"Il tuo ID Hardware è: {get_hwid()}")
+        sys.exit()
+
+    with open("license.key", "r") as f:
+        chiave_letta = f.read().strip()
+
+    # Decodifichiamo la licenza per confrontarla con l'ID reale
+    try:
+        id_autorizzato = base64.b64decode(chiave_letta).decode()
+    except:
+        print("ERRORE: Il file di licenza è corrotto.")
+        sys.exit()
+
+    if id_autorizzato == get_hwid():
+        print("Licenza verificata. Benvenuto!")
+    else:
+        print("ERRORE: Licenza non valida per questo computer.")
+        print(f"ID richiesto: {get_hwid()}")
+        sys.exit()
+
+
+# Esecuzione del controllo
+if __name__ == "__main__":
+    verifica_licenza()
+
+    # --- IL TUO CODICE INIZIA QUI ---
+    print("Esecuzione del software in corso...")
+
+import json
+import pandas as pd
+import customtkinter as ctk
+from tkinter import messagebox, filedialog, ttk
+import sqlite3
+import re
+import hashlib
+import shutil
+import os
+import csv
+from datetime import datetime
+
+# --- TEMA E COLORI ---
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("blue")
+
+
+class DatabaseSQL:
+    def __init__(self, db_path="database_flotta_pro.db"):
+        self.db_path = db_path
+        self.conn = sqlite3.connect(self.db_path)
+        self.cursor = self.conn.cursor()
+        # Ottimizzazioni performance SQLite (Velocizza letture e scritture)
+        self.cursor.execute("PRAGMA journal_mode=WAL;")
+        self.cursor.execute("PRAGMA synchronous=NORMAL;")
+
+        self.setup()
+
+    def setup(self):
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS veicoli
+                               (
+                                   targa
+                                   TEXT
+                                   PRIMARY
+                                   KEY,
+                                   marca
+                                   TEXT,
+                                   modello
+                                   TEXT,
+                                   anno
+                                   TEXT,
+                                   assicurazione
+                                   TEXT
+                               )''')
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS driver
+                               (
+                                   id
+                                   INTEGER
+                                   PRIMARY
+                                   KEY
+                                   AUTOINCREMENT,
+                                   nome
+                                   TEXT,
+                                   cognome
+                                   TEXT,
+                                   nascita
+                                   TEXT,
+                                   giro
+                                   TEXT,
+                                   email
+                                   TEXT,
+                                   telefono
+                                   TEXT,
+                                   targa
+                                   TEXT,
+                                   note
+                                   TEXT
+                               )''')
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS utenti
+                               (
+                                   username
+                                   TEXT
+                                   PRIMARY
+                                   KEY,
+                                   password
+                                   TEXT,
+                                   ruolo
+                                   TEXT
+                               )''')
+        # --- AGGIUNTI INDICI PER VELOCIZZARE LE RICERCHE COGNOME/GIRO/TARGA ---
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_driver_nome_cognome ON driver(nome, cognome);")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_driver_giro ON driver(giro);")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_driver_targa ON driver(targa);")
+        self.conn.commit()
+
+
+class SistemaGestionaleFlotta:
+    def __init__(self, root):
+        self.root = root
+        self.modificato = False
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+        # --- LOGICA DI RECUPERO ULTIMO DATABASE APERTO ---
+        db_predefinito = "database_flotta_pro.db"
+        if os.path.exists("config.json"):
+            try:
+                with open("config.json", "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    # Se il file salvato nel config esiste ancora sul PC, lo usa
+                    if os.path.exists(config.get("ultimo_db", "")):
+                        db_predefinito = config["ultimo_db"]
+            except:
+                pass  # Se il file config è corrotto, usa quello predefinito
+
+        # Inizializza il database con l'ultimo file valido trovato
+        self.db = DatabaseSQL(db_predefinito)
+
+        # Imposta la finestra e mostra il database in cima
+        self.root.geometry("1400x850+0+0")
+        self.aggiorna_titolo_finestra()
+
+        # Il resto del tuo __init__ rimane identico...
+        self.campi_d = ["Nome", "Cognome", "Nascita", "Giro", "Email", "Telefono", "Targa", "Note"]
+        self.campi_v = ["Targa", "Marca", "Modello", "Anno", "Assicurazione", "Stato"]
+        self.utente_attuale = None
+        self.filtro_liberi = False
+        self.root.withdraw()
+        self.mostra_login()
+
+    def aggiorna_titolo_finestra(self):
+        """Aggiorna il titolo in cima alla finestra mostrando il database attivo."""
+        nome_db = os.path.basename(self.db.db_path)
+        self.root.title(f"Gestione Flotta Pro - by Viorel  |  📂 Database Attivo: {nome_db}")
+
+    def salva_configurazione_db(self):
+        """Salva il percorso del database attuale nel file config.json."""
+        try:
+            with open("config.json", "w", encoding="utf-8") as f:
+                json.dump({"ultimo_db": self.db.db_path}, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"Errore nel salvataggio della configurazione: {e}")
+
+    # --- LOGICA DI ESPORTAZIONE ---
+    def esporta_driver_csv(self):
+        path = filedialog.asksaveasfilename(defaultextension=".csv",
+                                            initialfile="esporta_driver.csv",
+                                            filetypes=[("CSV File", "*.csv")])
+        if path:
+            self.db.cursor.execute("SELECT * FROM driver")
+            righe = self.db.cursor.fetchall()
+            with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+                w = csv.writer(f, delimiter=';')
+                w.writerow(["ID"] + self.campi_d)
+                w.writerows(righe)
+            messagebox.showinfo("Export", "Anagrafica Driver esportata con successo!")
+
+    def esporta_veicoli_csv(self):
+        path = filedialog.asksaveasfilename(defaultextension=".csv",
+                                            initialfile="esporta_veicoli.csv",
+                                            filetypes=[("CSV File", "*.csv")])
+        if path:
+            self.db.cursor.execute("SELECT * FROM veicoli")
+            veicoli = self.db.cursor.fetchall()
+            dati_finali = []
+            for v in veicoli:
+                self.db.cursor.execute("SELECT nome, cognome FROM driver WHERE targa=?", (v[0],))
+                res = self.db.cursor.fetchone()
+                stato = f"{res[0]} {res[1]}" if res else "Disponibile"
+                dati_finali.append((*v, stato))
+
+            with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+                w = csv.writer(f, delimiter=';')
+                w.writerow(self.campi_v)
+                w.writerows(dati_finali)
+            messagebox.showinfo("Export", "Elenco Veicoli esportato con successo!")
+
+    # --- GESTIONE FILE ---
+    def file_nuovo(self):
+        """Crea un nuovo database vuoto e vi copia l'utente amministratore corrente."""
+        path = filedialog.asksaveasfilename(defaultextension=".db", filetypes=[("Database SQL", "*.db")])
+        if path:
+            # Recuperiamo le credenziali dell'utente attuale per non perderle nel nuovo DB
+            self.db.cursor.execute("SELECT password, ruolo FROM utenti WHERE username=?",
+                                   (self.utente_attuale["nome"],))
+            user_data = self.db.cursor.fetchone()
+
+            # Chiudiamo la connessione precedente
+            self.db.conn.close()
+
+            # Inizializziamo il nuovo DB (il setup creerà le tabelle vuote)
+            self.db = DatabaseSQL(path)
+
+            # Reinseriamo l'utente admin corrente per permettergli l'accesso immediato
+            if user_data:
+                self.db.cursor.execute("INSERT OR IGNORE INTO utenti VALUES (?,?,?)",
+                                       (self.utente_attuale["nome"], user_data[0], user_data[1]))
+                self.db.conn.commit()
+
+            self.modificato = False
+            self.aggiorna_dati()
+            self.aggiorna_titolo_finestra()
+            self.salva_configurazione_db()
+            messagebox.showinfo("Nuovo Database", f"Nuovo database creato e attivo: {os.path.basename(path)}")
+
+    def file_apri(self):
+        path = filedialog.askopenfilename(filetypes=[("Database SQL", "*.db")])
+        if path:
+            self.db.conn.close()
+            self.db = DatabaseSQL(path)
+            self.aggiorna_dati()
+            self.aggiorna_titolo_finestra()
+            self.salva_configurazione_db()  # <--- Salva questo database come l'ultimo aperto
+            messagebox.showinfo("Apri", f"Database caricato: {os.path.basename(path)}")
+
+    def file_salva(self):
+        self.db.conn.commit()
+        self.modificato = False
+        messagebox.showinfo("Salva", "Modifiche salvate nel database.")
+
+    def file_salva_con_nome(self):
+        path = filedialog.asksaveasfilename(defaultextension=".db", filetypes=[("Database SQL", "*.db")])
+        if path:
+            self.db.conn.commit()
+            shutil.copy2(self.db.db_path, path)
+
+            self.db.conn.close()
+            self.db = DatabaseSQL(path)
+            self.modificato = False
+            self.aggiorna_dati()
+            self.aggiorna_titolo_finestra()
+            self.salva_configurazione_db()  # <--- Salva questo database come l'ultimo aperto
+            messagebox.showinfo("Salva con nome", f"Nuova copia creata e attiva: {os.path.basename(path)}")
+
+    def popup_ricerca_moderno(self, titolo, label_testo, callback):
+        pop = ctk.CTkToplevel(self.root)
+        pop.title(titolo)
+        pop.geometry("400x220")
+        pop.attributes("-topmost", True)
+        pop.grab_set()
+        ctk.CTkLabel(pop, text=label_testo, font=("Helvetica", 14, "bold")).pack(pady=15)
+        entry = ctk.CTkEntry(pop, width=300)
+        entry.pack(pady=10)
+        entry.focus_set()
+
+        def invia(event=None):
+            v = entry.get()
+            pop.destroy()
+            if v: callback(v)
+
+        btn = ctk.CTkButton(pop, text="CERCA", fg_color="#f1c40f", text_color="black", command=invia)
+        btn.pack(pady=15)
+        pop.bind("<Return>", invia)
+
+        # --- MODIFICA: Nuovo metodo per cercare all'interno di più colonne dell'anagrafica (Nome o Cognome) ---
+
+    def esegui_ricerca_driver(self, tree, val):
+        for item in tree.get_children():
+            valori = tree.item(item)['values']
+            # Cerca sia nel Nome (indice 1) che nel Cognome (indice 2)
+            if val.lower() in str(valori[1]).lower() or val.lower() in str(valori[2]).lower():
+                tree.selection_set(item)
+                tree.see(item)
+                return
+        messagebox.showwarning("Ricerca", "Nessun driver trovato con questo nome/cognome.")
+
+    # --- INTERFACCIA LOGIN ---
+    def mostra_login(self):
+        win = ctk.CTkToplevel(self.root)
+        win.geometry("400x450")
+        win.attributes("-topmost", True)
+        win.grab_set()
+        ctk.CTkLabel(win, text="LOG IN", font=("Helvetica", 24, "bold")).pack(pady=40)
+        u_ent = ctk.CTkEntry(win, width=250, placeholder_text="Username")
+        u_ent.pack(pady=10)
+        p_ent = ctk.CTkEntry(win, width=250, placeholder_text="Password", show="*")
+        p_ent.pack(pady=10)
+
+        def login():
+            u, p_raw = u_ent.get(), p_ent.get()
+            if not u or not p_raw:
+                messagebox.showerror("Errore", "Inserisci credenziali", parent=win)
+                return
+
+            p = hashlib.sha256(p_raw.encode()).hexdigest()
+
+            self.db.cursor.execute("SELECT COUNT(*) FROM utenti")
+            count = self.db.cursor.fetchone()[0]
+
+            # LOGICA PRIMO ADMIN: Se non ci sono utenti, il primo che logga diventa admin
+            if count == 0:
+                self.db.cursor.execute("INSERT INTO utenti VALUES (?,?,?)", (u, p, "admin"))
+                self.db.conn.commit()
+                messagebox.showinfo("Benvenuto", f"Primo utente '{u}' creato come Amministratore.", parent=win)
+
+            self.db.cursor.execute("SELECT ruolo FROM utenti WHERE username=? AND password=?", (u, p))
+            res = self.db.cursor.fetchone()
+            if res:
+                self.utente_attuale = {"nome": u, "ruolo": res[0]}
+                win.destroy()
+                self.crea_interfaccia()
+            else:
+                messagebox.showerror("Errore", "Dati errati", parent=win)
+
+        ctk.CTkButton(win, text="ACCEDI", command=login).pack(pady=30)
+
+    def crea_interfaccia(self):
+        self.root.deiconify()
+        perm = "normal" if self.utente_attuale["ruolo"] == "admin" else "disabled"
+
+        menu = ctk.CTkFrame(self.root, height=70, fg_color="#1e1e1e", corner_radius=0)
+        menu.pack(side="top", fill="x")
+
+        ctk.CTkButton(menu, state=perm, text="📄 NUOVO", fg_color="#2980b9", width=70, command=self.file_nuovo).pack(
+            side="left", padx=5, pady=15)
+        ctk.CTkButton(menu, state=perm, text="📂 APRI", fg_color="#34495e", width=70, command=self.file_apri).pack(
+            side="left", padx=5)
+        ctk.CTkButton(menu, state=perm, text="💾 SALVA", fg_color="#27ae60", width=70, command=self.file_salva).pack(
+            side="left", padx=5)
+        ctk.CTkButton(menu, state=perm, text="💾 SALVA CON...", fg_color="#16a085", width=100,
+                      command=self.file_salva_con_nome).pack(side="left", padx=5)
+        ctk.CTkButton(menu, text="📤 EXPORT DRIVER", fg_color="#d35400", width=130,
+                      command=self.esporta_driver_csv).pack(side="left", padx=5)
+        ctk.CTkButton(menu, text="📤 EXPORT MEZZI", fg_color="#a04000", width=130,
+                      command=self.esporta_veicoli_csv).pack(side="left", padx=5)
+
+        if self.utente_attuale["ruolo"] == "admin":
+            ctk.CTkButton(menu, text="⚙️ UTENTI", fg_color="#607D8B", width=90, command=self.gestione_utenti).pack(
+                side="left", padx=5)
+
+        ctk.CTkButton(menu, text="ESCI", fg_color="#e74c3c", width=70, command=self.on_closing).pack(side="right",
+                                                                                                     padx=15)
+        ctk.CTkLabel(menu, text=f"👤 {self.utente_attuale['nome'].upper()}", font=("Helvetica", 12, "bold"),
+                     text_color="#3498db").pack(side="right", padx=10)
+
+        self.tabs = ctk.CTkTabview(self.root, segmented_button_selected_color="#1f538d")
+        self.tabs.pack(expand=True, fill="both", padx=10, pady=10)
+        self.tab_d = self.tabs.add("       👤 ANAGRAFICA       ")
+        self.tab_v = self.tabs.add("       🚛 VEICOLI           ")
+
+        self.setup_tab_anagrafica(perm)
+        self.setup_tab_veicoli(perm)
+        self.aggiorna_dati()
+
+    def setup_tab_anagrafica(self, perm):
+        tb = ctk.CTkFrame(self.tab_d, fg_color="transparent")
+        tb.pack(fill="x", pady=10)
+        ctk.CTkButton(tb, text="➕ AGGIUNGI", fg_color="#2ecc71", command=lambda: self.form_driver(), state=perm).pack(
+            side="left", padx=5)
+        ctk.CTkButton(tb, text="📝 MODIFICA", fg_color="#3498db", command=self.modifica_driver, state=perm).pack(
+            side="left", padx=5)
+        ctk.CTkButton(tb, text="🗑️ ELIMINA", fg_color="#e74c3c", command=self.elimina_driver, state=perm).pack(
+            side="left", padx=5)
+        ctk.CTkButton(tb, text="🔗 ASSEGNA MEZZO", fg_color="#9b59b6", command=self.popup_assegna_da_driver,
+                      state=perm).pack(side="left", padx=5)
+        # Pulsante Cerca Giro esistente
+        ctk.CTkButton(tb, text="🔍 CERCA GIRO", fg_color="#f1c40f", text_color="black",
+                      command=lambda: self.popup_ricerca_moderno("Cerca Giro", "Numero Giro:",
+                                                                 lambda v: self.esegui_ricerca(self.tree_d, 4,
+                                                                                               v))).pack(side="right",
+                                                                                                         padx=5)
+        # NUOVO PULSANTE CERCA DRIVER (aggiunto a destra accanto a Cerca Giro)
+        ctk.CTkButton(tb, text="🔍 CERCA DRIVER", fg_color="#f1c40f", text_color="black",
+                      command=lambda: self.popup_ricerca_moderno("Cerca Driver", "Nome o Cognome:",
+                                                                 lambda v: self.esegui_ricerca_driver(self.tree_d,
+                                                                                                      v))).pack(
+            side="right", padx=5)
+        self.tree_d = self.crea_tree(self.tab_d, ["ID"] + self.campi_d)
+
+    def setup_tab_veicoli(self, perm):
+        tb = ctk.CTkFrame(self.tab_v, fg_color="transparent")
+        tb.pack(fill="x", pady=10)
+        ctk.CTkButton(tb, text="➕ AGGIUNGI MEZZO", fg_color="#2ecc71", command=self.form_veicolo, state=perm).pack(
+            side="left", padx=5)
+        ctk.CTkButton(tb, text="📝 MODIFICA MEZZO", fg_color="#3498db", command=self.modifica_veicolo, state=perm).pack(
+            side="left", padx=5)
+        ctk.CTkButton(tb, text="🗑️ ELIMINA", fg_color="#e74c3c", command=self.elimina_veicolo, state=perm).pack(
+            side="left", padx=5)
+        ctk.CTkButton(tb, text="🔓 LIBERA MEZZO", fg_color="#e67e22", command=self.libera_mezzo, state=perm).pack(
+            side="left", padx=5)
+        ctk.CTkButton(tb, text="🔗 COLLEGA DRIVER", fg_color="#9b59b6", command=self.popup_collega_driver,
+                      state=perm).pack(side="left", padx=5)
+        ctk.CTkButton(tb, text="🔍 CERCA TARGA", fg_color="#f1c40f", text_color="black",
+                      command=lambda: self.popup_ricerca_moderno("Cerca Targa", "Inserisci Targa:",
+                                                                 lambda v: self.esegui_ricerca(self.tree_v, 0,
+                                                                                               v.upper()))).pack(
+            side="right", padx=5)
+        self.btn_liberi = ctk.CTkButton(tb, text="🔍 SOLO LIBERI", fg_color="#444", command=self.toggle_liberi)
+        self.btn_liberi.pack(side="right", padx=5)
+        self.tree_v = self.crea_tree(self.tab_v, self.campi_v)
+
+    def crea_tree(self, parent, colonne):
+        fr = ctk.CTkFrame(parent)
+        fr.pack(expand=True, fill="both")
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Treeview", background="#2b2b2b", foreground="white", fieldbackground="#2b2b2b",
+                        font=("Helvetica", 14, "bold"), rowheight=35)
+        style.configure("Treeview.Heading", background="#2C5364", foreground="black", font=("Helvetica", 18, "bold"))
+        tree = ttk.Treeview(fr, columns=colonne, show="headings")
+        for c in colonne: tree.heading(c, text=c.upper()); tree.column(c, width=110, anchor="center")
+        tree.tag_configure('scaduto', background='#721c24')
+        tree.tag_configure('avviso', background='#f1c40f', foreground="black")
+        tree.pack(side="left", expand=True, fill="both")
+        sb = ttk.Scrollbar(fr, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        return tree
+
+    def aggiorna_dati(self):
+        for i in self.tree_d.get_children(): self.tree_d.delete(i)
+        for i in self.tree_v.get_children(): self.tree_v.delete(i)
+        self.db.cursor.execute("SELECT * FROM driver")
+        for r in self.db.cursor.fetchall(): self.tree_d.insert("", "end", values=r)
+        oggi = datetime.now()
+        self.db.cursor.execute("SELECT * FROM veicoli")
+        for v in self.db.cursor.fetchall():
+            self.db.cursor.execute("SELECT nome, cognome FROM driver WHERE targa=?", (v[0],))
+            res = self.db.cursor.fetchone()
+            stato = f"{res[0]} {res[1]}" if res else "Disponibile"
+            if self.filtro_liberi and stato != "Disponibile": continue
+            tag = ()
+            try:
+                sc = datetime.strptime(v[4], "%d/%m/%Y")
+                diff = (sc - oggi).days
+                if diff < 0:
+                    tag = ('scaduto',)
+                elif diff <= 30:
+                    tag = ('avviso',)
+            except:
+                pass
+            self.tree_v.insert("", "end", values=(*v, stato), tags=tag)
+
+    def esegui_ricerca(self, tree, col, val):
+        for item in tree.get_children():
+            if val.lower() in str(tree.item(item)['values'][col]).lower():
+                tree.selection_set(item)
+                tree.see(item)
+                return
+        messagebox.showwarning("Ricerca", "Nessun risultato.")
+
+    def form_veicolo(self, dati=None):
+        win = ctk.CTkToplevel(self.root)
+        win.geometry("400x550+10+10")
+        win.attributes("-topmost", True)
+        win.grab_set()
+        titolo = "MODIFICA VEICOLO" if dati else "AGGIUNGI VEICOLO"
+        ctk.CTkLabel(win, text=titolo, font=("Helvetica", 16, "bold")).pack(pady=15)
+        vars = {}
+        for i, c in enumerate(self.campi_v[:-1]):
+            ctk.CTkLabel(win, text=c).pack()
+            valore = str(dati[i]) if dati else ""
+            v = ctk.StringVar(value=valore)
+            e = ctk.CTkEntry(win, textvariable=v, width=250)
+            e.pack(pady=5)
+            vars[c] = v
+            if dati and c == "Targa": e.configure(state="disabled", fg_color="#3d3d3d")
+
+        def salva():
+            # .strip() rimuove gli spazi e .upper() rende tutto maiuscolo
+            d = [vars[c].get().strip().upper() for c in self.campi_v[:-1]]
+            targa_nuova = d[0]
+
+            if not targa_nuova:
+                messagebox.showerror("Errore", "La Targa è obbligatoria!", parent=win)
+                return
+
+            if not dati:
+                # Cerchiamo la targa forzando il confronto in maiuscolo
+                self.db.cursor.execute("SELECT targa FROM veicoli WHERE UPPER(targa)=?", (targa_nuova,))
+                if self.db.cursor.fetchone():
+                    messagebox.showerror("Errore Targa", f"La targa {targa_nuova} è già presente!", parent=win)
+                    return
+            try:
+                if dati:
+                    self.db.cursor.execute(
+                        "UPDATE veicoli SET marca=?, modello=?, anno=?, assicurazione=? WHERE targa=?",
+                        (d[1], d[2], d[3], d[4], dati[0]))
+                else:
+                    self.db.cursor.execute("INSERT INTO veicoli VALUES (?,?,?,?,?)", d)
+                self.db.conn.commit()
+                self.modificato = True
+                self.aggiorna_dati()
+                win.destroy()
+            except Exception as e:
+                messagebox.showerror("Errore", f"Errore: {e}", parent=win)
+
+        ctk.CTkButton(win, text="SALVA", fg_color="#2ecc71", command=salva).pack(pady=20)
+
+    def modifica_veicolo(self):
+        sel = self.tree_v.selection()
+        if sel:
+            self.form_veicolo(self.tree_v.item(sel[0])['values'])
+        else:
+            messagebox.showwarning("Alt", "Seleziona un veicolo")
+
+    def elimina_veicolo(self):
+        sel = self.tree_v.selection()
+        if sel and messagebox.askyesno("Alt", "Eliminare il veicolo selezionato?"):
+            self.db.cursor.execute("DELETE FROM veicoli WHERE targa=?", (self.tree_v.item(sel[0])['values'][0],))
+            self.db.conn.commit()
+            self.modificato = True
+            self.aggiorna_dati()
+
+    def libera_mezzo(self):
+        sel = self.tree_v.selection()
+        if sel:
+            self.db.cursor.execute("UPDATE driver SET targa='' WHERE targa=?", (self.tree_v.item(sel[0])['values'][0],))
+            self.db.conn.commit()
+            self.modificato = True
+            self.aggiorna_dati()
+
+    def popup_collega_driver(self):
+        sel = self.tree_v.selection()
+        if not sel: return
+        targa = self.tree_v.item(sel[0])['values'][0]
+        self.db.cursor.execute("SELECT id, nome, cognome FROM driver")
+        d_res = self.db.cursor.fetchall()
+        d_map = {f"{r[1]} {r[2]} (ID:{r[0]})": r[0] for r in d_res}
+        win = ctk.CTkToplevel(self.root)
+        win.geometry("400x250+10+10")
+        win.attributes("-topmost", True)
+        win.grab_set()
+        ctk.CTkLabel(win, text=f"Assegna Driver a {targa}:").pack(pady=20)
+        cb = ctk.CTkComboBox(win, values=["NESSUNO"] + list(d_map.keys()), width=280)
+        cb.pack(pady=10)
+
+        def ok():
+            self.db.cursor.execute("SELECT nome, cognome FROM driver WHERE targa=?", (targa,))
+            vecchio_driver = self.db.cursor.fetchone()
+            scelta = cb.get()
+            if scelta != "NESSUNO" and vecchio_driver:
+                nome_nuovo = scelta.split(" (ID:")[0]
+                nome_vecchio = f"{vecchio_driver[0]} {vecchio_driver[1]}"
+                if nome_nuovo != nome_vecchio:
+                    if not messagebox.askyesno("Sostituzione",
+                                               f"Il mezzo {targa} è di {nome_vecchio}. Confermi il passaggio a {nome_nuovo}?",
+                                               parent=win): return
+            self.db.cursor.execute("UPDATE driver SET targa='' WHERE targa=?", (targa,))
+            if cb.get() != "NESSUNO":
+                self.db.cursor.execute("UPDATE driver SET targa=? WHERE id=?", (targa, d_map[cb.get()]))
+            self.db.conn.commit()
+            self.aggiorna_dati()
+            win.destroy()
+
+        ctk.CTkButton(win, text="CONFERMA", fg_color="#2ecc71", command=ok).pack(pady=20)
+
+    def form_driver(self, dati=None):
+        win = ctk.CTkToplevel(self.root)
+        win.geometry("450x650+10+10")
+        win.attributes("-topmost", True)
+        win.grab_set()
+        # --- IMPOSTAZIONE TITOLO (BARRA SUPERIORE E IN ALTO NELLA FINESTRA) ---
+        titolo_testo = "MODIFICA DRIVER" if dati else "AGGIUNGI DRIVER"
+        win.title(titolo_testo)  # Titolo sulla barra della finestra
+
+        ctk.CTkLabel(win, text=titolo_testo, font=("Helvetica", 16, "bold")).pack(pady=15)  # Titolo in alto (Top)
+
+        # --- 1. RECUPERO TARGHE DAL DATABASE ---
+        self.db.cursor.execute("SELECT targa FROM veicoli ORDER BY targa")
+        elenco_targhe = [r[0] for r in self.db.cursor.fetchall()]
+        # Aggiungiamo un'opzione vuota se il driver non ha un mezzo assegnato
+        opzioni_targa = [""] + elenco_targhe
+
+        vars = {}
+        for i, c in enumerate(self.campi_d):
+            ctk.CTkLabel(win, text=c).pack()
+            valore_iniziale = str(dati[i + 1]) if dati else ""
+
+            # --- 2. GESTIONE CAMPO TARGA COME COMBOBOX ---
+            if c == "Targa":
+                v = ctk.StringVar(value=valore_iniziale)
+                # Se la targa attuale del driver non è nel database per qualche motivo, la aggiungiamo temporaneamente
+                if valore_iniziale and valore_iniziale not in opzioni_targa:
+                    opzioni_targa.append(valore_iniziale)
+
+                e = ctk.CTkComboBox(win, variable=v, values=opzioni_targa, width=250)
+                e.pack(pady=2)
+            else:
+                # Tutti gli altri campi rimangono normali campi di testo
+                v = ctk.StringVar(value=valore_iniziale)
+                e = ctk.CTkEntry(win, textvariable=v, width=250)
+                e.pack(pady=2)
+
+            vars[c] = v
+
+        def salva():
+            # .strip() rimuove spazi vuoti accidentali prima e dopo il testo
+            d = [vars[c].get().strip() for c in self.campi_d]
+
+            nome, cognome, nascita, giro = d[0], d[1], d[2], d[3]
+
+            if not nome or not cognome:
+                messagebox.showerror("Errore", "Nome e Cognome sono obbligatori!", parent=win)
+                return
+
+            # --- CONTROLLO DUPLICATO NOME E COGNOME ---
+            if dati:
+                self.db.cursor.execute(
+                    "SELECT id FROM driver WHERE LOWER(nome)=LOWER(?) AND LOWER(cognome)=LOWER(?) AND id != ?",
+                    (nome, cognome, dati[0])
+                )
+            else:
+                self.db.cursor.execute(
+                    "SELECT id FROM driver WHERE LOWER(nome)=LOWER(?) AND LOWER(cognome)=LOWER(?)",
+                    (nome, cognome)
+                )
+
+            if self.db.cursor.fetchone():
+                messagebox.showwarning("Duplicato", f"Il driver {nome} {cognome} è già presente nel sistema!",
+                                       parent=win)
+                return
+
+            # --- CONTROLLO DUPLICATO GIRO ---
+            if giro:
+                if dati:
+                    self.db.cursor.execute(
+                        "SELECT nome, cognome FROM driver WHERE LOWER(giro)=LOWER(?) AND id != ?",
+                        (giro, dati[0])
+                    )
+                else:
+                    self.db.cursor.execute(
+                        "SELECT nome, cognome FROM driver WHERE LOWER(giro)=LOWER(?)",
+                        (giro,)
+                    )
+
+                res_giro = self.db.cursor.fetchone()
+                if res_giro:
+                    messagebox.showwarning(
+                        "Giro Duplicato",
+                        f"Il giro '{giro}' è già assegnato al driver {res_giro[0]} {res_giro[1]}!",
+                        parent=win
+                    )
+                    return
+
+            # --- SALVATAGGIO NEL DATABASE ---
+            if dati:
+                self.db.cursor.execute(
+                    "UPDATE driver SET nome=?, cognome=?, nascita=?, giro=?, email=?, telefono=?, targa=?, note=? WHERE id=?",
+                    (*d, dati[0]))
+            else:
+                self.db.cursor.execute(
+                    "INSERT INTO driver (nome, cognome, nascita, giro, email, telefono, targa, note) VALUES (?,?,?,?,?,?,?,?)",
+                    d)
+            self.db.conn.commit()
+            self.modificato = True
+            self.aggiorna_dati()
+            win.destroy()
+
+        ctk.CTkButton(win, text="SALVA", fg_color="#2ecc71", command=salva).pack(pady=20)
+
+    def modifica_driver(self):
+        sel = self.tree_d.selection()
+        if sel: self.form_driver(self.tree_d.item(sel[0])['values'])
+
+    def elimina_driver(self):
+        sel = self.tree_d.selection()
+        if sel and messagebox.askyesno("Alt", "Eliminare il driver selezionato?"):
+            self.db.cursor.execute("DELETE FROM driver WHERE id=?", (self.tree_d.item(sel[0])['values'][0],))
+            self.db.conn.commit();
+            self.modificato = True;
+            self.aggiorna_dati()
+
+    def popup_assegna_da_driver(self):
+        sel = self.tree_d.selection()
+        if not sel: return
+        id_d = self.tree_d.item(sel[0])['values'][0]
+        self.db.cursor.execute("SELECT targa FROM veicoli")
+        targhe = [t[0] for t in self.db.cursor.fetchall()]
+        win = ctk.CTkToplevel(self.root)
+        win.geometry("300x220")
+        win.attributes("-topmost", True)
+        win.grab_set()
+        ctk.CTkLabel(win, text="Seleziona Targa:").pack(pady=10)
+        cb = ctk.CTkComboBox(win, values=["NESSUNA"] + targhe)
+        cb.pack(pady=10)
+
+        def ok():
+            t = cb.get() if cb.get() != "NESSUNA" else ""
+            if t != "":
+                self.db.cursor.execute("SELECT nome, cognome FROM driver WHERE targa=? AND id != ?", (t, id_d))
+                esistente = self.db.cursor.fetchone()
+                if esistente:
+                    if not messagebox.askyesno("Targa già assegnata",
+                                               f"La targa {t} è di {esistente[0]} {esistente[1]}. Vuoi spostarla?",
+                                               parent=win): return
+                    self.db.cursor.execute("UPDATE driver SET targa='' WHERE targa=?", (t,))
+            self.db.cursor.execute("UPDATE driver SET targa=? WHERE id=?", (t, id_d))
+            self.db.conn.commit();
+            self.aggiorna_dati();
+            win.destroy()
+
+        ctk.CTkButton(win, text="CONFERMA", command=ok).pack(pady=10)
+
+    def toggle_liberi(self):
+        self.filtro_liberi = not self.filtro_liberi
+        self.btn_liberi.configure(fg_color="#9b59b6" if self.filtro_liberi else "#444")
+        self.aggiorna_dati()
+
+    def gestione_utenti(self):
+        win = ctk.CTkToplevel(self.root)
+        win.geometry("500x700+10+10")
+        win.title("Gestione Utenti")
+        win.attributes("-topmost", True)
+        win.grab_set()
+
+        ctk.CTkLabel(win, text="NUOVO UTENTE", font=("Helvetica", 14, "bold")).pack(pady=10)
+        u = ctk.CTkEntry(win, placeholder_text="Nuovo User", width=250)
+        u.pack(pady=5)
+        p = ctk.CTkEntry(win, placeholder_text="Nuova Pass", show="*", width=250)
+        p.pack(pady=5)
+
+        def add():
+            if u.get() and p.get():
+                try:
+                    pw_hash = hashlib.sha256(p.get().encode()).hexdigest()
+                    self.db.cursor.execute("INSERT INTO utenti VALUES (?,?,?)", (u.get(), pw_hash, "user"))
+                    self.db.conn.commit()
+                    messagebox.showinfo("OK", "Utente aggiunto", parent=win)
+                    aggiorna_lista_utenti()
+                except:
+                    messagebox.showerror("Errore", "Username già esistente", parent=win)
+
+        ctk.CTkButton(win, text="AGGIUNGI UTENTE", fg_color="#2ecc71", command=add).pack(pady=10)
+
+        # --- LOGICA CAMBIO PASSWORD PER ADMIN STESSO ---
+        ctk.CTkLabel(win, text="CAMBIA TUA PASSWORD", font=("Helvetica", 12, "bold"), text_color="#3498db").pack(
+            pady=10)
+        p_new = ctk.CTkEntry(win, placeholder_text="Nuova Password", show="*", width=250)
+        p_new.pack(pady=5)
+
+        def cambia_password_admin():
+            nuova = p_new.get()
+            if not nuova:
+                messagebox.showwarning("Alt", "Inserisci la nuova password", parent=win)
+                return
+            pw_hash = hashlib.sha256(nuova.encode()).hexdigest()
+            self.db.cursor.execute("UPDATE utenti SET password=? WHERE username=?",
+                                   (pw_hash, self.utente_attuale["nome"]))
+            self.db.conn.commit()
+            messagebox.showinfo("Successo", "Password aggiornata con successo!", parent=win)
+            p_new.delete(0, 'end')
+
+        ctk.CTkButton(win, text="MODIFICA TUA PASSWORD", fg_color="#2980b9", command=cambia_password_admin).pack(pady=5)
+        # -----------------------------------------------
+
+        ctk.CTkLabel(win, text="UTENTI REGISTRATI", font=("Helvetica", 14, "bold")).pack(pady=15)
+        fr_list = ctk.CTkFrame(win)
+        fr_list.pack(expand=True, fill="both", padx=20, pady=5)
+        tree_u = ttk.Treeview(fr_list, columns=("User", "Ruolo"), show="headings", height=8)
+        tree_u.heading("User", text="USERNAME");
+        tree_u.heading("Ruolo", text="RUOLO")
+        tree_u.column("User", width=150, anchor="center");
+        tree_u.column("Ruolo", width=100, anchor="center")
+        tree_u.pack(side="left", expand=True, fill="both")
+
+        def aggiorna_lista_utenti():
+            for i in tree_u.get_children(): tree_u.delete(i)
+            self.db.cursor.execute("SELECT username, ruolo FROM utenti")
+            for row in self.db.cursor.fetchall(): tree_u.insert("", "end", values=row)
+
+        def elimina_utente():
+            sel = tree_u.selection()
+            if not sel: return
+            user_to_del = tree_u.item(sel[0])['values'][0]
+            if user_to_del == self.utente_attuale["nome"]:
+                messagebox.showerror("Errore", "Non puoi eliminare te stesso!", parent=win);
+                return
+            if messagebox.askyesno("Conferma", f"Eliminare '{user_to_del}'?", parent=win):
+                self.db.cursor.execute("DELETE FROM utenti WHERE username=?", (user_to_del,))
+                self.db.conn.commit();
+                aggiorna_lista_utenti()
+
+        ctk.CTkButton(win, text="🗑️ ELIMINA SELEZIONATO", fg_color="#e74c3c", command=elimina_utente).pack(pady=15)
+        aggiorna_lista_utenti()
+
+    def on_closing(self):
+        if self.modificato:
+            risposta = messagebox.askyesnocancel("Esci", "Ci sono modifiche non salvate. Salvare?")
+            if risposta is True:
+                self.file_salva();
+                self.root.destroy()
+            elif risposta is False:
+                self.root.destroy()
+        else:
+            if messagebox.askyesno("Esci", "Sei sicuro di voler uscire?"): self.root.destroy()
+
+
+if __name__ == "__main__":
+    app = SistemaGestionaleFlotta(ctk.CTk())
+    app.root.mainloop()

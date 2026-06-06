@@ -1,0 +1,33 @@
+{
+    "ultimo_db": "D:/Proiecte/Pycharm/Flotta/database_flotta_pro.db",
+    "larghezze_colonne": {
+        "driver": {
+            "ID": 206,
+            "Nome": 217,
+            "Cognome": 205,
+            "Nascita": 205,
+            "Giro": 205,
+            "Email": 193,
+            "Telefono": 205,
+            "Targa": 205,
+            "Note": 206
+        },
+        "veicoli": {
+            "Targa": 265,
+            "Marca": 263,
+            "Modello": 263,
+            "Anno": 263,
+            "Assicurazione": 264,
+            "Note": 264,
+            "Stato": 265
+        },
+        "presenze": {
+            "ID DRIVER": 148,
+            "NOME": 320,
+            "COGNOME": 234,
+            "GIRO": 157,
+            "TARGA MEZZO": 271,
+            "STATO PRESENZA": 281
+        }
+    }
+}
