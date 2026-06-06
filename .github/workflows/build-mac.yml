@@ -1,0 +1,40 @@
+name: Build Mac Executable
+
+# Il processo parte ogni volta che fai un "git push" sul ramo main
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    # Diciamo a GitHub di usare un computer macOS virtuale nei suoi server
+    runs-on: macos-latest
+
+    steps:
+    # 1. Scarica il tuo codice dentro il computer virtuale
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # 2. Installa Python
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10' # Puoi cambiarla con la tua versione di Python
+
+    # 3. Installa Pandas e PyInstaller
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pandas pyinstaller
+
+    # 4. Crea l'eseguibile per Mac
+    - name: Build with PyInstaller
+      run: |
+        pyinstaller --onefile gestore_flotta_sql_license_v4.2.6
+
+    # 5. Salva il file creato così puoi scaricarlo
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Mac-Executable
+        path: dist/
