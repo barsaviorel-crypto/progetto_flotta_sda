@@ -30,7 +30,7 @@ jobs:
     # 4. Crea l'eseguibile per Mac
     - name: Build with PyInstaller
       run: |
-        pyinstaller --onefile gestore_flotta_sql_license_v4.2.6
+        pyinstaller --onefile gestore_flotta_sql_license_v4.2.6.py
 
     # 5. Salva il file creato così puoi scaricarlo
     - name: Upload Artifact
